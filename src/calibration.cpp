@@ -13,56 +13,16 @@
 #include <string>
 #include <sstream>
 
-#include <Eigen/Eigen>
+#include <ceres/ceres.h>
 
 #include "../include/point_to_point_source_to_target_rotated_mirror_tait_bryan_wc_jacobian.h"
 
-inline double cauchy(double delta, double b){
-	return 1.0 / (M_PI * b *( 1.0 + ((delta)/b) * ((delta)/b) ) );
-}
+#include "imgui.h"
+#include "imgui_impl_glut.h"
+#include "imgui_impl_opengl2.h"
 
-struct DataStream{
-	double x;
-	double y;
-	double z;
-	double angle_rad;
-	double intensity;
-	double timestamp;
-};
-
-struct TaitBryanPose
-{
-	double px;
-	double py;
-	double pz;
-	double om;
-	double fi;
-	double ka;
-
-	TaitBryanPose(){
-		px = py = pz = om = fi = ka = 0.0;
-	}
-};
-
-struct Plane{
-	double a;
-	double b;
-	double c;
-	double d;
-	Eigen::Affine3d m;
-
-	float distance_to_plane(Eigen::Vector3d p){
-		return a * p.x() + b * p.y() + c * p.z() + d;
-	}
-
-	void from_m_to_abcd(){
-		a = m(0,2);
-		b = m(1,2);
-		c = m(2,2);
-		d = -a * m(0,3) - b * m(1,3) - c * m(2,3);
-	}
-
-};
+#include "utils.h"
+#include "cost_fun.h"
 
 const unsigned int window_width = 1920;
 const unsigned int window_height = 1080;
@@ -74,8 +34,8 @@ float translate_x, translate_y = 0.0;
 
 std::vector<std::vector<DataStream>> data_streams;
 Plane mirror;
-TaitBryanPose mirror_cal;
-std::vector<TaitBryanPose> instrument_poses;
+Sophus::SE3d mirror_cal = Sophus::SE3d(Eigen::Matrix4d::Identity());
+std::vector<Sophus::SE3d> instrument_poses;
 std::vector<pcl::PointCloud<pcl::PointXYZ>> pcs_global;
 float search_radious = 0.3;
 pcl::PointCloud<pcl::PointXYZ> ground_truth;
@@ -90,78 +50,15 @@ void motion(int x, int y);
 void reshape(int w, int h);
 void printHelp();
 
-pcl::PointCloud<pcl::PointXYZ> get_pc_global(const Plane& mirror, const TaitBryanPose& instrument_pose, const std::vector<DataStream>& data_stream);
+pcl::PointCloud<pcl::PointXYZ> get_pc_global(const Plane& mirror, const Sophus::SE3d& instrument_pose, const std::vector<DataStream>& data_stream);
 std::vector<std::pair<int,int>> nns(const pcl::PointCloud<pcl::PointXYZ>& pc1, const pcl::PointCloud<pcl::PointXYZ>& pc2, float radius);
 
-inline Eigen::Affine3d affine_matrix_from_pose_tait_bryan(const TaitBryanPose& pose)
-{
-	Eigen::Affine3d m = Eigen::Affine3d::Identity();
-
-	double sx = sin(pose.om);
-	double cx = cos(pose.om);
-	double sy = sin(pose.fi);
-	double cy = cos(pose.fi);
-	double sz = sin(pose.ka);
-	double cz = cos(pose.ka);
-
-	m(0,0) = cy * cz;
-	m(1,0) = cz * sx * sy + cx * sz;
-	m(2,0) = -cx * cz * sy + sx * sz;
-
-	m(0,1) = -cy * sz;
-	m(1,1) = cx * cz - sx * sy * sz;
-	m(2,1) = cz * sx + cx * sy * sz;
-
-	m(0,2) = sy;
-	m(1,2) = -cy * sx;
-	m(2,2) = cx * cy;
-
-	m(0,3) = pose.px;
-	m(1,3) = pose.py;
-	m(2,3) = pose.pz;
-
-	return m;
-}
-
-inline TaitBryanPose pose_tait_bryan_from_affine_matrix(Eigen::Affine3d m){
-	TaitBryanPose pose;
-
-	pose.px = m(0,3);
-	pose.py = m(1,3);
-	pose.pz = m(2,3);
-
-	if (m(0,2) < 1) {
-		if (m(0,2) > -1) {
-			//case 1
-			pose.fi = asin(m(0,2));
-			pose.om = atan2(-m(1,2), m(2,2));
-			pose.ka = atan2(-m(0,1), m(0,0));
-
-			return pose;
-		}
-		else //r02 = −1
-		{
-			//case 2
-			// not a unique solution: thetaz − thetax = atan2 ( r10 , r11 )
-			pose.fi = -M_PI / 2.0;
-			pose.om = -atan2(m(1,0), m(1,1));
-			pose.ka = 0;
-			return pose;
-		}
-	}
-	else {
-		//case 3
-		// r02 = +1
-		// not a unique solution: thetaz + thetax = atan2 ( r10 , r11 )
-		pose.fi = M_PI / 2.0;
-		pose.om = atan2(m(1,0), m(1,1));
-		pose.ka = 0.0;
-		return pose;
-	}
-
-	return pose;
-}
-
+struct imgui_data_type{
+    Eigen::Matrix<float,6,1> mirror_cal;
+    Eigen::Matrix<float,4,1> abcd;
+    std::vector<Eigen::Matrix<float,6,1>> poses;
+};
+imgui_data_type imgui_data;
 bool load_data_stream(std::vector<DataStream> &data, const std::string &filename)
 {
 	std::ifstream f;
@@ -197,8 +94,8 @@ bool load_data_stream(std::vector<DataStream> &data, const std::string &filename
 	}
 
 	////////////////////decimation
-	TaitBryanPose instrument_pose;
-	pcl::PointCloud<pcl::PointXYZ> pc = get_pc_global(mirror, instrument_pose, data);
+	Sophus::SE3d intrumentent_pose;
+	pcl::PointCloud<pcl::PointXYZ> pc = get_pc_global(mirror, intrumentent_pose, data);
 
 	pcl::PointCloud<pcl::PointXYZL>::Ptr pre_filteredcloud (new pcl::PointCloud<pcl::PointXYZL>);
 	pcl::PointCloud<pcl::PointXYZL>::Ptr post_filteredcloud_m (new pcl::PointCloud<pcl::PointXYZL>);
@@ -244,12 +141,7 @@ int main(int argc, char *argv[]){
 	v=v/v.norm();
 	mirror.d = 0.01;
 
-	mirror_cal.px = 0;
-	mirror_cal.py= 0;
-	mirror_cal.pz = 0;
-	mirror_cal.om = 0;
-	mirror_cal.fi = 0;
-	mirror_cal.ka = 0;
+    mirror_cal = Sophus::SE3d(Eigen::Matrix4d::Identity());
 
 	std::vector<std::string> file_names;
 
@@ -263,7 +155,7 @@ int main(int argc, char *argv[]){
 	pose.om = 1.44997;
 	pose.fi = -1.48019;
 	pose.ka = 1.45228;
-	instrument_poses.push_back(pose);
+	instrument_poses.push_back(rotating_mirror::TaitBryanPoseToSE3(pose));
 
 	pose.px = 37.6912;
 	pose.py = -2.46042;
@@ -271,7 +163,14 @@ int main(int argc, char *argv[]){
 	pose.om = -1.23007;
 	pose.fi = -1.54447;
 	pose.ka = -1.23228;
-	instrument_poses.push_back(pose);
+    instrument_poses.push_back(rotating_mirror::TaitBryanPoseToSE3(pose));
+
+    for (int i =0; i< instrument_poses.size(); i++)
+    {
+        imgui_data.poses.push_back(instrument_poses[i].log().cast<float>());
+    }
+    imgui_data.mirror_cal = mirror_cal.log().cast<float>();
+    imgui_data.abcd = mirror.getABCD().cast<float>();
 
 	for(size_t i = 0 ; i < file_names.size(); i++){
 		std::cout << "loading " << i << std::endl;
@@ -320,11 +219,24 @@ bool initGL(int *argc, char **argv) {
 	gluPerspective(60.0, (GLfloat) window_width / (GLfloat) window_height, 0.01,
 			10000.0);
 	glutReshapeFunc(reshape);
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    //io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
 
+    ImGui::StyleColorsDark();
+    ImGui_ImplGLUT_Init();
+    ImGui_ImplGLUT_InstallFuncs();
+    ImGui_ImplOpenGL2_Init();
 	return true;
 }
 
-
+void  update()
+{
+    for(size_t i = 0; i < data_streams.size(); i++){
+        pcl::PointCloud<pcl::PointXYZ> pc_global = get_pc_global(mirror, instrument_poses[i], data_streams[i]);
+        pcs_global[i] = pc_global;
+    }
+}
 void display() {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -374,9 +286,89 @@ void display() {
 		}
 		glEnd();
 	}
+    ImGui_ImplOpenGL2_NewFrame();
+    ImGui_ImplGLUT_NewFrame();
 
+    ImGui::Begin("Demo Window2");
+    if (ImGui::Button("ma+")){ mirror.a+=0.01; update();}
+    ImGui::SameLine();
+    if (ImGui::Button("ma-")){ mirror.a-=0.01; update();}
+
+    if (ImGui::Button("mb+")){ mirror.b+=0.01; update();}
+    ImGui::SameLine();
+    if (ImGui::Button("mb-")){ mirror.b-=0.01; update();}
+
+    if (ImGui::Button("mc+")){ mirror.c+=0.01; update();}
+    ImGui::SameLine();
+    if (ImGui::Button("mc-")){ mirror.c-=0.01; update();}
+
+    if (ImGui::Button("md+")){ mirror.d+=0.01; update();}
+    ImGui::SameLine();
+    if (ImGui::Button("md-")){ mirror.d-=0.01; update();}
+
+    ImGui::Text("------");
+    for (int i=0; i <6 ; i++) {
+        std::string f1 = "mcal_"+std::to_string(i)+"+";
+        std::string f2 = "mcal_"+std::to_string(i)+"-";
+        if (ImGui::Button(f1.c_str())) {
+            auto c = mirror_cal.log();
+            c[i] += 0.01;
+            mirror_cal = Sophus::SE3d::exp(c);
+            update();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(f2.c_str())) {
+            auto c = mirror_cal.log();
+            c[i] -= 0.01;
+            mirror_cal = Sophus::SE3d::exp(c);
+            update();
+        }
+    }
+
+    for (int j =0; j < instrument_poses.size(); j++)
+    {
+        for (int i=0; i <6 ; i++) {
+            std::string f1 = "p"+std::to_string(j)+"_"+std::to_string(i)+"+";
+            std::string f2 = "p"+std::to_string(j)+"_"+std::to_string(i)+"-";
+            if (ImGui::Button(f1.c_str())) {
+                auto c = instrument_poses[j].log();
+                c[i] += 0.01;
+                instrument_poses[j] = Sophus::SE3d::exp(c);
+                update();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(f2.c_str())) {
+                auto c = instrument_poses[j].log();
+                c[i] -= 0.01;
+                instrument_poses[j] = Sophus::SE3d::exp(c);
+                update();
+            }
+        }
+    }
+
+    if (ImGui::Button("export pcd")){
+        pcl::PointCloud<pcl::PointXYZ> pc_save;
+        for (int i=0; i < pcs_global.size();i++)
+        {
+            for (int j=0; j < pcs_global[i].size();j++)
+            {
+                pc_save.push_back(pcs_global[i][j]);
+            }
+        }
+
+        pcl::io::savePCDFile("pcd_exported2.pcd", pc_save);
+    }
+
+    ImGui::Text("Text");
+    ImGui::End();
+
+
+    ImGui::Render();
+    ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
 	glutSwapBuffers();
+    glutPostRedisplay();
 }
+
 
 
 void keyboard(unsigned char key, int /*x*/, int /*y*/) {
@@ -385,289 +377,66 @@ void keyboard(unsigned char key, int /*x*/, int /*y*/) {
 			glutDestroyWindow(glutGetWindow());
 			return;
 		}
-
 		case 'c':{
-			for(int iter = 0; iter < 50; iter++){
 
-				std::cout << "optimize" << std::endl;
+            std::cout << "optimize" << std::endl;
+            ceres::Problem problem;
+            Eigen::Vector4d  plane {mirror.a,mirror.b,mirror.c,mirror.d};
+            std::vector<Sophus::Vector6d> params_before;
+            problem.AddParameterBlock(plane.data(), 4, new LocalParameterizationPlane());
+            for (int i =0; i< instrument_poses.size();i++)
+            {
+                problem.AddParameterBlock(instrument_poses[i].data(), Sophus::SE3d::num_parameters, new LocalParameterizationSE3());
+                params_before.push_back(instrument_poses[i].log());
+            }
+            problem.AddParameterBlock(mirror_cal.data(), Sophus::SE3d::num_parameters, new LocalParameterizationSE3());
+            problem.SetParameterBlockConstant(mirror_cal.data());
 
-				std::vector<Eigen::Triplet<double>> tripletListA;
-				std::vector<Eigen::Triplet<double>> tripletListP;
-				std::vector<Eigen::Triplet<double>> tripletListB;
+            const Sophus::Vector6d mirror_pose_before = mirror_cal.log();
+            for(size_t i = 0 ; i < data_streams.size(); i++){
+                auto nn = nns (pcs_global[i],ground_truth, search_radious);
 
-				double plane_a = mirror.a;
-				double plane_b = mirror.b;
-				double plane_c = mirror.c;
-				double plane_d = mirror.d;
-
-
-				for(size_t i = 0 ; i < data_streams.size(); i++){
-					auto nn = nns (pcs_global[i],ground_truth, search_radious);
-
-					std::cout << "nn.size(): " << nn.size() << std::endl;
-
-					for (auto & n : nn)
-					{
-						TaitBryanPose instrument_pose_i = instrument_poses[i];
-
-						Eigen::Vector3d ray_i(data_streams[i][n.first].x, data_streams[i][n.first].y, data_streams[i][n.first].z);
-						double ray_i_length = ray_i.norm();
-						Eigen::Vector3d ray_i_n = ray_i/ray_i.norm();
-
-						double x_t = ground_truth[n.second].x;
-						double y_t = ground_truth[n.second].y;
-						double z_t = ground_truth[n.second].z;
-
-						double om_mirror = data_streams[i][n.first].angle_rad;
-
-						Eigen::Matrix<double, 3, 1> delta;
-						point_to_point_source_to_target_rotated_mirror_tait_bryan_wc(
-								delta,
-								instrument_pose_i.px,
-								instrument_pose_i.py,
-								instrument_pose_i.pz,
-								instrument_pose_i.om,
-								instrument_pose_i.fi,
-								instrument_pose_i.ka,
-								ray_i_n.x(),
-								ray_i_n.y(),
-								ray_i_n.z(),
-								ray_i_length,
-								plane_a,
-								plane_b,
-								plane_c,
-								plane_d,
-								x_t,
-								y_t,
-								z_t,
-								om_mirror,
-								mirror_cal.px,
-								mirror_cal.py,
-								mirror_cal.pz,
-								mirror_cal.om,
-								mirror_cal.fi,
-								mirror_cal.ka);
-
-						Eigen::Matrix<double, 3, 14, Eigen::RowMajor> jacobian;
-
-						point_to_point_source_to_target_rotated_mirror_tait_bryan_wc_jacobian(
-								jacobian,
-								instrument_pose_i.px,
-								instrument_pose_i.py,
-								instrument_pose_i.pz,
-								instrument_pose_i.om,
-								instrument_pose_i.fi,
-								instrument_pose_i.ka,
-								ray_i_n.x(),
-								ray_i_n.y(),
-								ray_i_n.z(),
-								ray_i_length,
-								plane_a,
-								plane_b,
-								plane_c,
-								plane_d,
-								x_t,
-								y_t,
-								z_t,
-								om_mirror,
-								mirror_cal.px,
-								mirror_cal.py,
-								mirror_cal.pz,
-								mirror_cal.om,
-								mirror_cal.fi,
-								mirror_cal.ka);
-
-						int ir = tripletListB.size();
-						int ic = i * 6 + 8;
-
-						tripletListA.emplace_back(ir     , 0, -jacobian(0,6));
-						tripletListA.emplace_back(ir     , 1, -jacobian(0,7));
-						tripletListA.emplace_back(ir     , 2, -jacobian(0,8));
-						tripletListA.emplace_back(ir     , 3, -jacobian(0,9));
-
-						tripletListA.emplace_back(ir     , 4, -jacobian(0,10));
-						tripletListA.emplace_back(ir     , 5, -jacobian(0,11));
-						tripletListA.emplace_back(ir     , 6, -jacobian(0,12));
-						tripletListA.emplace_back(ir     , 7, -jacobian(0,13));
-
-						tripletListA.emplace_back(ir     , ic + 0, -jacobian(0,0));
-						tripletListA.emplace_back(ir     , ic + 1, -jacobian(0,1));
-						tripletListA.emplace_back(ir     , ic + 2, -jacobian(0,2));
-						tripletListA.emplace_back(ir     , ic + 3, -jacobian(0,3));
-						tripletListA.emplace_back(ir     , ic + 4, -jacobian(0,4));
-						tripletListA.emplace_back(ir     , ic + 5, -jacobian(0,5));
+                std::cout << "nn.size(): " << nn.size() << std::endl;
 
 
-						tripletListA.emplace_back(ir + 1 , 0, -jacobian(1,6));
-						tripletListA.emplace_back(ir + 1 , 1, -jacobian(1,7));
-						tripletListA.emplace_back(ir + 1 , 2, -jacobian(1,8));
-						tripletListA.emplace_back(ir + 1 , 3, -jacobian(1,9));
 
-						tripletListA.emplace_back(ir + 1 , 4, -jacobian(1,10));
-						tripletListA.emplace_back(ir + 1 , 5, -jacobian(1,11));
-						tripletListA.emplace_back(ir + 1 , 6, -jacobian(1,12));
-						tripletListA.emplace_back(ir + 1 , 7, -jacobian(1,13));
+                for (auto & n : nn) {
+                    Sophus::SE3d &instrument_pose_i = instrument_poses[i];
 
-						tripletListA.emplace_back(ir + 1 , ic + 0, -jacobian(1,0));
-						tripletListA.emplace_back(ir + 1 , ic + 1, -jacobian(1,1));
-						tripletListA.emplace_back(ir + 1 , ic + 2, -jacobian(1,2));
-						tripletListA.emplace_back(ir + 1 , ic + 3, -jacobian(1,3));
-						tripletListA.emplace_back(ir + 1 , ic + 4, -jacobian(1,4));
-						tripletListA.emplace_back(ir + 1 , ic + 5, -jacobian(1,5));
+                    Eigen::Vector3d ray_i(data_streams[i][n.first].x, data_streams[i][n.first].y,
+                                          data_streams[i][n.first].z);
 
+                    Eigen::Vector3d traget_i(ground_truth[n.second].x, ground_truth[n.second].y,
+                                             ground_truth[n.second].z);
 
-						tripletListA.emplace_back(ir + 2 , 0, -jacobian(2,6));
-						tripletListA.emplace_back(ir + 2 , 1, -jacobian(2,7));
-						tripletListA.emplace_back(ir + 2 , 2, -jacobian(2,8));
-						tripletListA.emplace_back(ir + 2 , 3, -jacobian(2,9));
+                    double om_mirror = data_streams[i][n.first].angle_rad;
+                    ceres::LossFunction *loss = nullptr;// new ceres::CauchyLoss(0.2);
 
-						tripletListA.emplace_back(ir + 2 , 4, -jacobian(2,10));
-						tripletListA.emplace_back(ir + 2 , 5, -jacobian(2,11));
-						tripletListA.emplace_back(ir + 2 , 6, -jacobian(2,12));
-						tripletListA.emplace_back(ir + 2 , 7, -jacobian(2,13));
+                    ceres::CostFunction * cost_function = MirrorOptimization::Create(ray_i, traget_i, om_mirror);
+                    problem.AddResidualBlock(cost_function, loss, plane.data(), instrument_poses[i].data(), mirror_cal.data());
 
-						tripletListA.emplace_back(ir + 2 , ic + 0, -jacobian(2,0));
-						tripletListA.emplace_back(ir + 2 , ic + 1, -jacobian(2,1));
-						tripletListA.emplace_back(ir + 2 , ic + 2, -jacobian(2,2));
-						tripletListA.emplace_back(ir + 2 , ic + 3, -jacobian(2,3));
-						tripletListA.emplace_back(ir + 2 , ic + 4, -jacobian(2,4));
-						tripletListA.emplace_back(ir + 2 , ic + 5, -jacobian(2,5));
+                }
 
+            }
+            ceres::Solver::Options options;
+            options.linear_solver_type = ceres::DENSE_QR;
+            options.minimizer_progress_to_stdout = true;
+            options.max_num_iterations = 50;
+            ceres::Solver::Summary summary;
+            ceres::Solve(options, &problem, &summary);
+            std::cout << summary.FullReport() << "\n";
+            std::cout << "mirror diff "  << plane.x()-mirror.a <<", "<< plane.y()-mirror.b <<", "<< plane.z()-mirror.c <<", "<< plane.w()-mirror.d <<"\n";
+            for (int i=0; i <  params_before.size();i++)
+            {
+                std::cout << " -> pose "<< i <<"diff "  << (instrument_poses[i].log()-params_before[i]).transpose() << std::endl;
+            }
+            std::cout << " mirror diff "  << (mirror_pose_before-mirror_cal.log()).transpose() << std::endl;
+            for(size_t i = 0; i < data_streams.size(); i++){
+                pcl::PointCloud<pcl::PointXYZ> pc_global = get_pc_global(mirror, instrument_poses[i], data_streams[i]);
+                pcs_global[i] = pc_global;
+            }
+            break;
 
-						tripletListP.emplace_back(ir    , ir    ,  1);
-						tripletListP.emplace_back(ir + 1, ir + 1,  1);
-						tripletListP.emplace_back(ir + 2, ir + 2,  1);
-
-
-						tripletListB.emplace_back(ir    , 0,  delta(0,0));
-						tripletListB.emplace_back(ir + 1, 0,  delta(1,0));
-						tripletListB.emplace_back(ir + 2, 0,  delta(2,0));
-					}
-				}
-
-				int ir = tripletListB.size();
-				int ic = 0;
-
-				tripletListA.emplace_back(ir , ic, 1);
-				tripletListA.emplace_back(ir + 1, ic + 1, 1);
-				tripletListA.emplace_back(ir + 2, ic + 2, 1);
-				tripletListA.emplace_back(ir + 3, ic + 3, 1);
-				tripletListA.emplace_back(ir + 4, ic + 4, 1);
-				tripletListA.emplace_back(ir + 5, ic + 5, 1);
-				tripletListA.emplace_back(ir + 6, ic + 6, 1);
-				tripletListA.emplace_back(ir + 7, ic + 7, 1);
-
-				tripletListP.emplace_back(ir    , ir    ,  1);
-				tripletListP.emplace_back(ir + 1   , ir + 1   ,  1);
-				tripletListP.emplace_back(ir + 2   , ir + 2   ,  1);
-				tripletListP.emplace_back(ir + 3   , ir + 3   ,  1);
-				tripletListP.emplace_back(ir + 4   , ir + 4   ,  1);
-				tripletListP.emplace_back(ir + 5   , ir + 5   ,  1);
-				tripletListP.emplace_back(ir + 6   , ir + 6   ,  1);
-				tripletListP.emplace_back(ir + 7   , ir + 7   ,  1);
-
-				tripletListB.emplace_back(ir    , 0, 0);
-				tripletListB.emplace_back(ir + 1, 0, 0);
-				tripletListB.emplace_back(ir + 2, 0, 0);
-				tripletListB.emplace_back(ir + 3, 0, 0);
-				tripletListB.emplace_back(ir + 4, 0, 0);
-				tripletListB.emplace_back(ir + 5, 0, 0);
-				tripletListB.emplace_back(ir + 6, 0, 0);
-				tripletListB.emplace_back(ir + 7, 0, 0);
-
-				int state_vec_l = 4 + 4 + data_streams.size() * 6;
-				std::cout << "state_vec_l " << state_vec_l << std::endl;
-
-				Eigen::SparseMatrix<double> matA(tripletListB.size(), state_vec_l);
-				Eigen::SparseMatrix<double> matP(tripletListB.size(), tripletListB.size());
-				Eigen::SparseMatrix<double> matB(tripletListB.size(), 1);
-
-				matA.setFromTriplets(tripletListA.begin(), tripletListA.end());
-				matP.setFromTriplets(tripletListP.begin(), tripletListP.end());
-				matB.setFromTriplets(tripletListB.begin(), tripletListB.end());
-
-				Eigen::SparseMatrix<double> AtPA(state_vec_l, state_vec_l);
-				Eigen::SparseMatrix<double> AtPB(state_vec_l, 1);
-
-				{
-				Eigen::SparseMatrix<double> AtP = matA.transpose() * matP;
-				AtPA = (AtP) * matA;
-				AtPB = (AtP) * matB;
-				}
-
-				Eigen::SimplicialCholesky<Eigen::SparseMatrix<double>> solver(AtPA);
-
-				Eigen::SparseMatrix<double> x = solver.solve(AtPB);
-
-				std::vector<double> h_x;
-
-				h_x.resize(state_vec_l);
-
-				for(size_t i = 0 ; i < state_vec_l; i++)h_x[i] = 0;
-
-				for (int k=0; k<x.outerSize(); ++k){
-					for (Eigen::SparseMatrix<double>::InnerIterator it(x,k); it; ++it){
-						h_x[it.row()] = it.value();
-					}
-				}
-
-				std::cout << "h_x.size() " << h_x.size() << std::endl;
-				std::cout << "results" << std::endl;
-				for(size_t i = 0 ; i < h_x.size(); i++){
-					std::cout << i << " " << h_x[i] << std::endl;
-				}
-
-				if(h_x.size() == state_vec_l){
-					int counter = 0;
-
-					mirror.a += h_x[counter++]*0.5;
-					mirror.b += h_x[counter++]*0.5;
-					mirror.c += h_x[counter++]*0.5;
-					mirror.d += h_x[counter++]*0.5;
-
-					mirror_cal.py += h_x[counter++]*0.5;
-					mirror_cal.pz += h_x[counter++]*0.5;
-					mirror_cal.fi += h_x[counter++]*0.5;
-					mirror_cal.ka += h_x[counter++]*0.5;
-
-
-					Eigen::Vector3d v(mirror.a, mirror.b, mirror.c);
-					v = v/v.norm();
-
-					mirror.a = v.x();
-					mirror.b = v.y();
-					mirror.c = v.z();
-
-					for (int i=0; i < instrument_poses.size(); i++)
-					{
-						instrument_poses[i].px += h_x[counter++]*0.5;
-						instrument_poses[i].py += h_x[counter++]*0.5;
-						instrument_poses[i].pz += h_x[counter++]*0.5;
-						instrument_poses[i].om += h_x[counter++]*0.5;
-						instrument_poses[i].fi += h_x[counter++]*0.5;
-						instrument_poses[i].ka += h_x[counter++]*0.5;
-					}
-
-					std::cout << "a,b,c,d: " << mirror.a << " " << mirror.b << " " << mirror.c << " " << mirror.d << std::endl;
-					for (int i=0; i < instrument_poses.size(); i++)
-					{
-						std::cout << "pose " << i << std::endl;
-						std::cout << instrument_poses[i].px << " " << instrument_poses[i].py << " " << instrument_poses[i].pz << " " <<
-								instrument_poses[i].om << " " << instrument_poses[i].fi << " " << instrument_poses[i].ka << std::endl;
-					}
-
-					std::cout << "mirror_cal: " << mirror_cal.px << " " << mirror_cal.py << " " << mirror_cal.pz << " " <<
-							mirror_cal.om << " " << mirror_cal.fi << " " << mirror_cal.ka << std::endl;
-
-					for(size_t i = 0; i < data_streams.size(); i++){
-						pcl::PointCloud<pcl::PointXYZ> pc_global = get_pc_global(mirror, instrument_poses[i], data_streams[i]);
-						pcs_global[i] = pc_global;
-					}
-				}else{
-					std::cout << "OPTIMIZATION FAILED" << std::endl;
-				}
-			}
-			break;
 		}
 	}
 	printHelp();
@@ -675,38 +444,56 @@ void keyboard(unsigned char key, int /*x*/, int /*y*/) {
 }
 
 
-void mouse(int button, int state, int x, int y) {
-	if (state == GLUT_DOWN) {
-		mouse_buttons |= 1 << button;
-	} else if (state == GLUT_UP) {
-		mouse_buttons = 0;
-	}
+void mouse(int glut_button, int state, int x, int y) {
 
-	mouse_old_x = x;
-	mouse_old_y = y;
+    ImGuiIO& io = ImGui::GetIO();
+    io.MousePos = ImVec2((float)x, (float)y);
+    int button = -1;
+    if (glut_button == GLUT_LEFT_BUTTON) button = 0;
+    if (glut_button == GLUT_RIGHT_BUTTON) button = 1;
+    if (glut_button == GLUT_MIDDLE_BUTTON) button = 2;
+    if (button != -1 && state == GLUT_DOWN)
+        io.MouseDown[button] = true;
+    if (button != -1 && state == GLUT_UP)
+        io.MouseDown[button] = false;
+
+    if (!io.WantCaptureMouse)
+    {
+        if (state == GLUT_DOWN) {
+            mouse_buttons |= 1 << glut_button;
+        } else if (state == GLUT_UP) {
+            mouse_buttons = 0;
+        }
+        mouse_old_x = x;
+        mouse_old_y = y;
+    }
+
 }
 
 void motion(int x, int y) {
-	float dx, dy;
-	dx = (float) (x - mouse_old_x);
-	dy = (float) (y - mouse_old_y);
+    ImGuiIO& io = ImGui::GetIO();
+    io.MousePos = ImVec2((float)x, (float)y);
 
-	if (mouse_buttons & 1) {
-		rotate_x += dy * 0.2f;
-		rotate_y += dx * 0.2f;
-
-	} else if (mouse_buttons & 4) {
-		translate_z += dy * 0.05f;
-	} else if (mouse_buttons & 3) {
-		translate_x += dx * 0.05f;
-		translate_y -= dy * 0.05f;
-	}
-
-	mouse_old_x = x;
-	mouse_old_y = y;
-
-	glutPostRedisplay();
+    if (!io.WantCaptureMouse)
+    {
+        float dx, dy;
+        dx = (float) (x - mouse_old_x);
+        dy = (float) (y - mouse_old_y);
+        if (mouse_buttons & 1) {
+            rotate_x += dy * 0.2f;
+            rotate_y += dx * 0.2f;
+        } else if (mouse_buttons & 4) {
+            translate_z += dy * 0.05f;
+        } else if (mouse_buttons & 3) {
+            translate_x += dx * 0.05f;
+            translate_y -= dy * 0.05f;
+        }
+        mouse_old_x = x;
+        mouse_old_y = y;
+    }
+    glutPostRedisplay();
 }
+
 
 void reshape(int w, int h) {
 	glViewport(0, 0, (GLsizei) w, (GLsizei) h);
@@ -723,41 +510,22 @@ void printHelp() {
 }
 
 
-pcl::PointCloud<pcl::PointXYZ> get_pc_global(const Plane& mirror, const TaitBryanPose& instrument_pose, const std::vector<DataStream>& data_stream)
+pcl::PointCloud<pcl::PointXYZ> get_pc_global(const Plane& mirror, const Sophus::SE3d & instrument_pose, const std::vector<DataStream>& data_stream)
 {
 	pcl::PointCloud<pcl::PointXYZ> pc_global;
-	double px = instrument_pose.px;
-	double py = instrument_pose.py;
-	double pz = instrument_pose.pz;
-	double om = instrument_pose.om;
-	double fi = instrument_pose.fi;
-	double ka = instrument_pose.ka;
-	double a = mirror.a;
-	double b = mirror.b;
-	double c = mirror.c;
-	double d = mirror.d;
+    Eigen::Vector4d  plane{ mirror.a, mirror.b, mirror.c, mirror.d};
 
 	for(auto &ds:data_stream){
 		double x;
 		double y;
 		double z;
 		Eigen::Vector3d ray(ds.x, ds.y, ds.z);
-		double length = ray.norm();
 		double angle_rad = ds.angle_rad;
-
-		ray = ray / ray.norm();
-
-		transform_point_rotated_mirror_tait_bryan_wc(x, y, z, px, py, pz, om, fi, ka,
-				ray.x(), ray.y(), ray.z(), length,
-				a, b, c, d, angle_rad, mirror_cal.px, mirror_cal.py, mirror_cal.pz, mirror_cal.om, mirror_cal.fi, mirror_cal.ka);
-
+        Eigen::Matrix<double,3,1> g = getPointOfRay<double>(plane, instrument_pose,mirror_cal, ray, angle_rad);
 		pcl::PointXYZ p;
-		p.x = x;
-		p.y = y;
-		p.z = z;
+		p.getArray3fMap() = g.cast<float>();
 		pc_global.push_back(p);
 	}
-
 	return pc_global;
 }
 
@@ -795,7 +563,6 @@ std::vector<std::pair<int,int>> nns(const pcl::PointCloud<pcl::PointXYZ>& pc1, c
 
                 break;
             }
-
         }
     }
     std::cout << "nns.size(): " << result.size() << std::endl;

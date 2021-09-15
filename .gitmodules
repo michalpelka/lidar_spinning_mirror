@@ -1,0 +1,6 @@
+[submodule "calibration_tool/3rd/imgui"]
+		path = 3rd/imgui
+		url = https://github.com/ocornut/imgui.git
+[submodule "calibration_tool/3rd/Sophus"]
+		path = 3rd/Sophus
+		url = https://github.com/strasdat/Sophus.git

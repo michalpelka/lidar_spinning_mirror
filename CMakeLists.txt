@@ -40,22 +40,36 @@ endif()
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
 
+find_package(Ceres REQUIRED)
+include_directories( ${CERES_INCLUDE_DIRS})
+
 include_directories(
 	${EIGEN3_INCLUDE_DIR} 
 	${EIGEN3_INCLUDE_DIRS} 
 	${Eigen3_DIR}
         ${Boost_INCLUDE_DIRS} 
 	${PCL_INCLUDE_DIRS}
+	3rd/Sophus include
 )
+
+include_directories(3rd/imgui 3rd/imgui/backends ${PCL_INCLUDE_DIRS})
+set(ImGui_Glut_src 3rd/imgui/imgui.cpp 3rd/imgui/imgui_demo.cpp 3rd/imgui/imgui_draw.cpp 3rd/imgui/imgui_widgets.cpp
+		3rd/imgui/backends/imgui_impl_glut.cpp 3rd/imgui/backends/imgui_impl_opengl2.cpp)
+
+
 
 add_executable(calibration
 	src/calibration.cpp
+	src/utils.cpp
+		${ImGui_Glut_src}
 )
+
 
 target_link_libraries(calibration
    	${OPENGL_LIBRARIES}
 	${GLUT_glut_LIBRARY}
 	${PCL_LIBRARIES}
+	${CERES_LIBRARIES}
 )
 
 add_executable(validation
