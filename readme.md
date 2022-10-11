@@ -1,7 +1,7 @@
 # Lidar spinning mirror
 
 ## Repository goal
-At this moment repository contains C++ code with optimizer that optimizes a geometyry 
+At this moment repository contains C++ code with optimizer that optimizes a geometry 
 of the Livox Mid-40 LiDAR's field of view. Prototype of the device allows to spin a 
 reflector with speed from 1RPM to 120RPM. Device has time synchronization that enables 
 precise measurment. With presented method of calibration a fesh apporach for LiDAR's FOV 
