@@ -5,8 +5,6 @@ At this moment repository contains C++ code with an optimizer that optimizes the
 of the Livox Mid-40 LiDAR's field of view. The prototype of the device allows spinning a 
 reflector with a speed from 1RPM to 120RPM. The device has time synchronization that enables 
 precise measurement. With a presented method of calibration, a fresh approach for LiDAR's FOV 
-reshaping is presented.
-
 
 ## Demo 5 RPM
 ![Demo 5 rpm](doc/railway_slow.gif)
