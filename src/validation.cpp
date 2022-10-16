@@ -216,9 +216,9 @@ bool load_data_stream(std::vector<DataStream> &data, const std::string &filename
 
 	pcl::VoxelGrid<pcl::PointXYZL> sor0;
 	sor0.setInputCloud (pre_filteredcloud);
-	sor0.setLeafSize (0.1,0.1,0.1);
+	sor0.setLeafSize (0.0001,0.0001,0.0001);
 	sor0.filter (*post_filteredcloud_m);
-
+    post_filteredcloud_m = pre_filteredcloud ;
 
 	std::vector<DataStream> ds2;
 	ds2.resize(post_filteredcloud_m->size());

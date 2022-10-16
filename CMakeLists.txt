@@ -67,7 +67,3 @@ target_link_libraries(validation
 	${GLUT_glut_LIBRARY}
 	${PCL_LIBRARIES}
 )
-
-
-
-

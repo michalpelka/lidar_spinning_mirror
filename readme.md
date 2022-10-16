@@ -1,10 +1,10 @@
 # Lidar spinning mirror
 
 ## Repository goal
-At this moment repository contains C++ code with optimizer that optimizes a geometyry 
-of the Livox Mid-40 LiDAR's field of view. Prototype of the device allows to spin a 
-reflector with speed from 1RPM to 120RPM. Device has time synchronization that enables 
-precise measurment. With presented method of calibration a fesh apporach for LiDAR's FOV 
+At this moment repository contains C++ code with an optimizer that optimizes the geometry 
+of the Livox Mid-40 LiDAR's field of view. The prototype of the device allows spinning a 
+reflector with a speed from 1RPM to 120RPM. The device has time synchronization that enables 
+precise measurement. With a presented method of calibration, a fresh approach for LiDAR's FOV 
 reshaping is presented.
 
 
@@ -20,9 +20,9 @@ reshaping is presented.
 # Mechanical design 
 ![Photo](doc/system_photo.jpg)
 
-System is build with a tilted reflectorthat spins. The angle is read by a contacless encoder.
-An electronic PCB produce synchronization signal for Livox Mid-40.
+The system is built with a tilted reflector that spins. The angle is read by a contactless encoder.
+An electronic PCB produces a synchronization signal for Livox Mid-40.
 
 ## Plans
- - Develop open hardware version of calibrated system using more avaible components (e.g. clasical encoder and DC motor and widely aviable STM32 board )
+ - Develop an open hardware version of the calibrated system using more available components (e.g. classic encoder and DC motor and widely available STM32 board )
  - Release firmware and ROS-node
